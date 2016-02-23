@@ -9,7 +9,7 @@ Vagrant.configure(2) do |config|
        zypper -n ar http://download.opensuse.org/repositories/systemsmanagement:/saltstack/openSUSE_Leap_42.1/systemsmanagement:saltstack.repo
        zypper -n --gpg-auto-import-keys ref
        sudo zypper -n install --from systemsmanagement_saltstack --no-recommends salt
-       salt-call -l debug --file-root /vagrant/salt --pillar-root=/vagrant/pillar --local state.highstate
+       salt-call -l debug --file-root /vagrant/vagrant/salt --pillar-root=/vagrant/vagrant/pillar --local state.highstate
     SHELL
   end
 
@@ -22,7 +22,7 @@ Vagrant.configure(2) do |config|
        zypper -n ar http://download.opensuse.org/repositories/systemsmanagement:/saltstack/openSUSE_Leap_42.1/systemsmanagement:saltstack.repo
        zypper -n --gpg-auto-import-keys ref
        sudo zypper -n install --from systemsmanagement_saltstack --no-recommends salt
-       salt-call -l debug --file-root /vagrant/salt --pillar-root=/vagrant/pillar --local state.highstate
+       salt-call -l debug --file-root /vagrant/vagrant/salt --pillar-root=/vagrant/vagrant/pillar --local state.highstate
     SHELL
     end
   end
