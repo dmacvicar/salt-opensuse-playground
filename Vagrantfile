@@ -6,7 +6,9 @@ Vagrant.configure(2) do |config|
     master.vm.provision 'shell', inline: <<-SHELL
        export PATH=$PATH:/sbin
        hostnamectl set-hostname master
-       sudo zypper -n install --no-recommends salt
+       zypper -n ar http://download.opensuse.org/repositories/systemsmanagement:/saltstack/openSUSE_Leap_42.1/systemsmanagement:saltstack.repo
+       zypper -n --gpg-auto-import-keys ref
+       sudo zypper -n install --from systemsmanagement_saltstack --no-recommends salt
        salt-call -l debug --file-root /vagrant/salt --pillar-root=/vagrant/pillar --local state.highstate
     SHELL
   end
@@ -17,7 +19,9 @@ Vagrant.configure(2) do |config|
       minion.vm.provision 'shell', inline: <<-SHELL
        export PATH=$PATH:/sbin
        hostnamectl set-hostname minion#{i}
-       sudo zypper -n install --no-recommends salt
+       zypper -n ar http://download.opensuse.org/repositories/systemsmanagement:/saltstack/openSUSE_Leap_42.1/systemsmanagement:saltstack.repo
+       zypper -n --gpg-auto-import-keys ref
+       sudo zypper -n install --from systemsmanagement_saltstack --no-recommends salt
        salt-call -l debug --file-root /vagrant/salt --pillar-root=/vagrant/pillar --local state.highstate
     SHELL
     end
