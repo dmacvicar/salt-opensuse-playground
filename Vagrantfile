@@ -3,6 +3,7 @@ Vagrant.configure(2) do |config|
   config.vm.synced_folder './', '/vagrant', type: '9p'
   config.vm.define 'master' do |master|
     # master.vm.hostname = 'master'
+    master.vm.synced_folder './srv/salt', '/srv/salt', type: '9p'
     master.vm.provision 'shell', inline: <<-SHELL
        export PATH=$PATH:/sbin
        hostnamectl set-hostname master
