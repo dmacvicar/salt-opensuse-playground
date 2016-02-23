@@ -1,5 +1,5 @@
 Vagrant.configure(2) do |config|
-  config.vm.box = 'alchemy-solutions/opensuseleap42.1'
+  config.vm.box = 'opensuse/openSUSE-42.1-x86_64'
   config.vm.synced_folder './', '/vagrant', type: '9p'
   config.vm.define 'master' do |master|
     # master.vm.hostname = 'master'
