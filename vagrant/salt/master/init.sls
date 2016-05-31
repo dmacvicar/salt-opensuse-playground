@@ -14,6 +14,7 @@ salt-master:
   service.running:
     - watch:
         - file: /etc/salt/master.d/vagrant-fileroot.conf
+        - file: /etc/salt/master.d/salt-auth.conf
     - enable: True
 
 publish master:
@@ -29,3 +30,32 @@ publish master:
             - /vagrant/srv/salt
     - require:
         - pkg: salt-master
+
+# configure salt api
+salt-api:
+  pkg.installed: []
+  service.running:
+    - watch:
+        - file: /etc/salt/master.d/salt-api-world.conf
+    - enable: True
+
+/etc/salt/master.d/salt-api-world.conf:
+    file.managed:
+    - contents: |
+        rest_cherrypy:
+          port: 8000
+          host: 0.0.0.0
+          disable_ssl: True
+          debug: True
+
+/etc/salt/master.d/salt-auth.conf:
+    file.managed:
+    - contents: |
+        external_auth:
+          auto:
+            admin:
+              - .*
+              - '@wheel'
+              - '@runner'
+              - '@jobs'
+
