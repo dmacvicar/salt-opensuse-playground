@@ -1,6 +1,7 @@
 Vagrant.configure(2) do |config|
   config.vm.box = 'opensuse/openSUSE-42.1-x86_64'
-  config.vm.synced_folder './', '/vagrant', type: '9p'
+  #config.vm.synced_folder './', '/vagrant', type: '9p', accessmode: "mapped"
+  config.vm.synced_folder './', '/vagrant'
   config.vm.define 'master' do |master|
     # master.vm.hostname = 'master'
     master.vm.provision 'shell', inline: <<-SHELL
