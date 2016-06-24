@@ -19,7 +19,7 @@ option. This will give users a couple release cycles to modify their scripts,
 SLS files, etc. to use the new functionality, rather than forcing users to
 change everything immediately.
 
-In the **Carbon** release of Salt (due in 2016), this execution module will
+In the **Nitrogen** release of Salt (due in 2017), this execution module will
 take the place of the default Docker execution module, and backwards-compatible
 naming will be maintained for a couple releases after that to allow users time
 to replace references to ``dockerng`` with ``docker``.
@@ -44,9 +44,14 @@ Docker_. docker-py can easily be installed using :py:func:`pip.install
 Authentication
 --------------
 
-To push or pull images, credentials must be configured. Because a password must
-be used, it is recommended to place this configuration in :ref:`Pillar
-<pillar>` data. The configuration schema is as follows:
+To push or pull images, credentials must be configured. By default dockerng will
+try to get the credentials from the default docker auth file, located under the
+home directory of the user running the salt-minion (HOME/.docker/config.json).
+Because a password must be used, it is recommended to place this configuration
+in :ref:`Pillar <pillar>` data. If pillar data specifies a registry already
+present in the default docker auth file, it will override.
+
+The configuration schema is as follows:
 
 .. code-block:: yaml
 
@@ -256,6 +261,8 @@ import shutil
 import string
 import sys
 import time
+import base64
+import errno
 
 # Import Salt libs
 from salt.exceptions import CommandExecutionError, SaltInvocationError
@@ -301,7 +308,7 @@ __func_alias__ = {
 }
 
 # Minimum supported versions
-MIN_DOCKER = (1, 4, 0)
+MIN_DOCKER = (1, 6, 0)
 MIN_DOCKER_PY = (1, 4, 0)
 
 VERSION_RE = r'([\d.]+)'
@@ -370,7 +377,7 @@ VALID_CREATE_OPTS = {
     'domainname': {
         'validator': 'string',
         'path': 'Config:Domainname',
-        'default': '',
+        'get_default_from_container': True,
     },
     'interactive': {
         'api_name': 'stdin_open',
@@ -400,7 +407,7 @@ VALID_CREATE_OPTS = {
     'memory_swap': {
         'api_name': 'memswap_limit',
         'path': 'HostConfig:MemorySwap',
-        'default': 0,
+        'get_default_from_container': True,
     },
     'mac_address': {
         'validator': 'string',
@@ -432,6 +439,12 @@ VALID_CREATE_OPTS = {
         'path': 'Config:Volumes',
         'image_path': 'Config:Volumes',
     },
+    'stop_signal': {
+        'validator': 'string',
+        'path': 'Config:StopSignal',
+        'min_docker': (1, 9, 0),
+        'default': '',
+    },
     'cpu_shares': {
         'validator': 'number',
         'path': 'HostConfig:CpuShares',
@@ -442,8 +455,9 @@ VALID_CREATE_OPTS = {
         'default': '',
     },
     'labels': {
-      'path': 'Config:Labels',
-      'default': {},
+        'path': 'Config:Labels',
+        'image_path': 'Config:Labels',
+        'default': {},
     },
     'binds': {
         'path': 'HostConfig:Binds',
@@ -457,6 +471,9 @@ VALID_CREATE_OPTS = {
         'validator': 'dict',
         'path': 'HostConfig:LxcConf',
         'default': None,
+    },
+    'security_opt': {
+        'path': 'HostConfig:SecurityOpt',
     },
     'publish_all_ports': {
         'validator': 'bool',
@@ -524,15 +541,14 @@ def __virtual__():
     Only load if docker libs are present
     '''
     if HAS_DOCKER_PY:
-        try:
-            docker_py_versioninfo = _get_docker_py_versioninfo()
-        except CommandExecutionError:
-            docker_py_versioninfo = None
+        docker_py_versioninfo = _get_docker_py_versioninfo()
 
         # Don't let a failure to interpret the version keep this module from
         # loading. Log a warning (log happens in _get_docker_py_versioninfo()).
-        if docker_py_versioninfo is None \
-                or docker_py_versioninfo >= MIN_DOCKER_PY:
+        if docker_py_versioninfo is None:
+            return (False, 'Docker module found, but no version could be'
+                    ' extracted')
+        if docker_py_versioninfo >= MIN_DOCKER_PY:
             try:
                 docker_versioninfo = version().get('VersionInfo')
             except CommandExecutionError:
@@ -542,24 +558,26 @@ def __virtual__():
                 return __virtualname__
             else:
                 return (False,
-                    'Insufficient Docker version for dockerng (required: '
-                    '{0}, installed: {1})'.format(
-                        '.'.join(map(str, MIN_DOCKER)),
-                        '.'.join(map(str, docker_versioninfo))))
-        else:
-            return (False,
+                        'Insufficient Docker version for dockerng (required: '
+                        '{0}, installed: {1}); You need to "pip install -U docker-py"'.format(
+                            '.'.join(map(str, MIN_DOCKER)),
+                            '.'.join(map(str, docker_versioninfo))))
+        return (False,
                 'Insufficient docker-py version for dockerng (required: '
                 '{0}, installed: {1})'.format(
                     '.'.join(map(str, MIN_DOCKER_PY)),
                     '.'.join(map(str, docker_py_versioninfo))))
-    return (False, 'Docker module could not get imported')
+    return (False, 'Docker module could not get imported; You need to "pip install docker-py"')
 
 
 def _get_docker_py_versioninfo():
     '''
-    Returns a version_info tuple for docker-py
+    Returns the version_info tuple from docker-py
     '''
-    return docker.version_info
+    try:
+        return docker.version_info
+    except AttributeError:
+        pass
 
 
 # Decorators
@@ -602,11 +620,16 @@ class _client_version(object):
             _get_client()
             current_version = '.'.join(map(str, _get_docker_py_versioninfo()))
             if distutils.version.StrictVersion(current_version) < self.version:
-                raise CommandExecutionError(
+                error_message = (
                     'This function requires a Docker Client version of at least '
                     '{0}. Version in use is {1}.'
-                    .format(self.version, current_version)
-                )
+                    .format(self.version, current_version))
+                minion_conf = __salt__['config.get']('docker.version', NOTSET)
+                if minion_conf is not NOTSET:
+                    error_message += (
+                        ' Hint: Your minion configuration specified'
+                        ' `docker.version` = "{0}"'.format(minion_conf))
+                raise CommandExecutionError(error_message)
             return func(*args, **salt.utils.clean_kwargs(**kwargs))
         return _mimic_signature(func, wrapper)
 
@@ -670,7 +693,7 @@ def _change_state(name, action, expected, *args, **kwargs):
                 'state': {'old': expected, 'new': expected},
                 'comment': ('Container \'{0}\' already {1}'
                             .format(name, expected))}
-    response = _client_wrapper(action, name, *args, **kwargs)
+    _client_wrapper(action, name, *args, **kwargs)
     _clear_context()
     try:
         post = state(name)
@@ -679,8 +702,6 @@ def _change_state(name, action, expected, *args, **kwargs):
         post = None
     ret = {'result': post == expected,
            'state': {'old': pre, 'new': post}}
-    if action == 'wait':
-        ret['exit_status'] = response
     return ret
 
 
@@ -730,6 +751,8 @@ def _get_client(timeout=None):
             client_kwargs['base_url'] = os.environ.get('DOCKER_HOST')
 
         if 'version' not in client_kwargs:
+            # Let docker-py auto detect docker version incase
+            # it's not defined by user.
             client_kwargs['version'] = 'auto'
 
         __context__['docker.client'] = docker.Client(**client_kwargs)
@@ -910,8 +933,38 @@ def _image_wrapper(attr, *args, **kwargs):
     catch_api_errors = kwargs.pop('catch_api_errors', True)
 
     if kwargs.pop('client_auth', False):
-        # Set credentials
-        registry_auth_config = __pillar__.get('docker-registries', {})
+        # Get credential from the home directory of the user running
+        # salt-minion, default auth file for docker (~/.docker/config.json)
+        registry_auth_config = {}
+        try:
+            home = os.path.expanduser("~")
+            docker_auth_file = os.path.join(home, '.docker', 'config.json')
+            with salt.utils.fopen(docker_auth_file) as fp:
+                try:
+                    docker_auth = json.load(fp)
+                    fp.close()
+                except (OSError, IOError) as exc:
+                    if exc.errno != errno.ENOENT:
+                        log.error('Failed to read docker auth file %s: %s', docker_auth_file, exc)
+                        docker_auth = {}
+                if isinstance(docker_auth, dict):
+                    if 'auths' in docker_auth and isinstance(docker_auth['auths'], dict):
+                        for key, data in six.iteritems(docker_auth['auths']):
+                            if isinstance(data, dict):
+                                email = str(data.get('email', ''))
+                                b64_auth = base64.b64decode(data.get('auth', ''))
+                                username, password = b64_auth.split(':')
+                                registry = 'https://{registry}'.format(registry=key)
+                                registry_auth_config.update({registry: {
+                                    'username': username,
+                                    'password': password,
+                                    'email': email
+                                }})
+        except Exception as e:
+            log.debug('dockerng was unable to load credential from ~/.docker/config.json'
+                      ' trying with pillar now ({0})'.format(e))
+        # Set credentials from pillar - Overwrite auth from config.json
+        registry_auth_config.update(__pillar__.get('docker-registries', {}))
         for key, data in six.iteritems(__pillar__):
             if key.endswith('-docker-registries'):
                 registry_auth_config.update(data)
@@ -1166,7 +1219,7 @@ def _validate_input(kwargs,
         if isinstance(kwargs['command'], six.string_types):
             # Translate command into a list of strings
             try:
-                kwargs['command'] = shlex.split(kwargs['command'])
+                kwargs['command'] = salt.utils.shlex_split(kwargs['command'])
             except AttributeError:
                 pass
         try:
@@ -1239,7 +1292,7 @@ def _validate_input(kwargs,
     def _valid_ports():  # pylint: disable=unused-variable
         '''
         Format ports in the documented way:
-        http://docker-py.readthedocs.org/en/stable/port-bindings/
+        https://docker-py.readthedocs.io/en/stable/port-bindings/
 
         It's possible to pass this as a dict, and indeed it is returned as such
         in the inspect output. Passing port configurations as a dict will work
@@ -1310,7 +1363,7 @@ def _validate_input(kwargs,
         if isinstance(kwargs['entrypoint'], six.string_types):
             # Translate entrypoint into a list of strings
             try:
-                kwargs['entrypoint'] = shlex.split(kwargs['entrypoint'])
+                kwargs['entrypoint'] = salt.utils.shlex_split(kwargs['entrypoint'])
             except AttributeError:
                 pass
         try:
@@ -1346,7 +1399,7 @@ def _validate_input(kwargs,
                         )
                     if not isinstance(val, six.string_types):
                         raise SaltInvocationError(
-                            'Environment values must be strings {key}={val!r}'
+                            'Environment values must be strings {key}=\'{val}\''
                             .format(key=key, val=val))
                     repacked_env[key] = val
             kwargs['environment'] = repacked_env
@@ -1354,7 +1407,7 @@ def _validate_input(kwargs,
             for key, val in six.iteritems(kwargs['environment']):
                 if not isinstance(val, six.string_types):
                     raise SaltInvocationError(
-                        'Environment values must be strings {key}={val!r}'
+                        'Environment values must be strings {key}=\'{val}\''
                         .format(key=key, val=val))
         elif not isinstance(kwargs['environment'], dict):
             raise SaltInvocationError(
@@ -1439,9 +1492,9 @@ def _validate_input(kwargs,
                         'Host path {0} in bind {1} is not absolute'
                         .format(container_path, bind)
                     )
-                log.warn('Host path {0} in bind {1} is not absolute,'
-                         ' assuming it is a docker volume.'.format(host_path,
-                                                                   bind))
+                log.warning('Host path {0} in bind {1} is not absolute,'
+                            ' assuming it is a docker volume.'
+                            .format(host_path, bind))
             if not os.path.isabs(container_path):
                 raise SaltInvocationError(
                     'Container path {0} in bind {1} is not absolute'
@@ -1449,6 +1502,23 @@ def _validate_input(kwargs,
                 )
             new_binds[host_path] = {'bind': container_path, 'ro': read_only}
         kwargs['binds'] = new_binds
+
+    def _valid_security_opt():  # pylint: disable=unused-variable
+        '''
+        Must be a single colon separated string or a list of colon separated
+        strings
+        '''
+        if kwargs.get('security_opt') is None:
+            # No need to validate
+            return
+
+        if (not isinstance(kwargs['security_opt'], six.string_types) and
+                not isinstance(kwargs['security_opt'], list)):
+            raise SaltInvocationError(
+                'security_opt must be a single value or a Python list')
+
+        if isinstance(kwargs['security_opt'], six.string_types):
+            kwargs['security_opt'] = [kwargs['security_opt']]
 
     def _valid_links():  # pylint: disable=unused-variable
         '''
@@ -1612,7 +1682,7 @@ def _validate_input(kwargs,
                 # just a name assume it is a network
                 log.info(
                     'Assuming network_mode \'{0}\' is a network.'.format(
-                      kwargs['network_mode'])
+                        kwargs['network_mode'])
                 )
         except SaltInvocationError:
             raise SaltInvocationError(
@@ -2215,7 +2285,10 @@ def list_containers(**kwargs):
     '''
     ret = set()
     for item in six.itervalues(ps_(all=kwargs.get('all', False))):
-        for c_name in [x.lstrip('/') for x in item.get('Names', []) or []]:
+        names = item.get('Names')
+        if not names:
+            continue
+        for c_name in [x.lstrip('/') for x in names or []]:
             ret.add(c_name)
     return sorted(ret)
 
@@ -2383,7 +2456,7 @@ def ps_(filters=None, **kwargs):
             continue
         for item in container:
             c_state = 'running' \
-                if container['Status'].lower().startswith('up ') \
+                if container.get('Status', '').lower().startswith('up ') \
                 else 'stopped'
             bucket = context_data.setdefault(c_state, {})
             c_key = key_map.get(item, item)
@@ -2787,6 +2860,14 @@ def create(image,
             effect if the container is using the LXC execution driver, which
             has not been the default for some time.
 
+    security_opt
+        Security configuration for MLS systems such as SELinux and AppArmor.
+
+        Example 1: ``security_opt="apparmor:unconfined"``
+
+        Example 2: ``security_opt=["apparmor:unconfined"]``
+        ``security_opt=["apparmor:unconfined", "param2:value2"]``
+
     publish_all_ports : False
         Allocates a random host port for each port exposed using the ``ports``
         argument to :py:func:`dockerng.create <salt.modules.dockerng.create>`.
@@ -2938,9 +3019,9 @@ def create(image,
             if 'api_name' in val:
                 create_kwargs[val['api_name']] = create_kwargs.pop(key)
 
-    # Added to manage api change in 1.19.
-    # mem_limit and memswap_limit must be provided in host_config object
-    if salt.utils.version_cmp(version()['ApiVersion'], '1.18') == 1:
+    # API v1.15 introduced HostConfig parameter
+    # https://docs.docker.com/engine/reference/api/docker_remote_api_v1.15/#create-a-container
+    if salt.utils.version_cmp(version()['ApiVersion'], '1.15') > 0:
         client = __context__['docker.client']
         host_config_args = inspect_module.getargspec(docker.utils.create_host_config).args
         create_kwargs['host_config'] = client.create_host_config(
@@ -3359,7 +3440,8 @@ def build(path=None,
           cache=True,
           rm=True,
           api_response=False,
-          fileobj=None):
+          fileobj=None,
+          dockerfile=None):
     '''
     Builds a docker image from a Dockerfile or a URL
 
@@ -3387,6 +3469,11 @@ def build(path=None,
         to be passed in place of a file ``path`` argument. This argument should
         not be used from the CLI, only from other Salt code.
 
+    dockerfile
+        Allows for an alternative Dockerfile to be specified.  Path to alternative
+        Dockefile is relative to the build path for the Docker container.
+
+        .. versionadded:: develop
 
     **RETURN DATA**
 
@@ -3418,6 +3505,10 @@ def build(path=None,
 
         salt myminion dockerng.build /path/to/docker/build/dir image=myimage:dev
         salt myminion dockerng.build https://github.com/myuser/myrepo.git image=myimage:latest
+
+        .. versionadded:: develop
+
+        salt myminion dockerng.build /path/to/docker/build/dir dockerfile=Dockefile.different image=myimage:dev
     '''
     _prep_pull()
 
@@ -3429,7 +3520,8 @@ def build(path=None,
                                quiet=False,
                                fileobj=fileobj,
                                rm=rm,
-                               nocache=not cache)
+                               nocache=not cache,
+                               dockerfile=dockerfile)
     ret = {'Time_Elapsed': time.time() - time_started}
     _clear_context()
 
@@ -4816,7 +4908,7 @@ def unpause(name):
 unfreeze = salt.utils.alias_function(unpause, 'unfreeze')
 
 
-def wait(name):
+def wait(name, ignore_already_stopped=False, fail_on_exit_status=False):
     '''
     Wait for the container to exit gracefully, and return its exit code
 
@@ -4827,6 +4919,13 @@ def wait(name):
     name
         Container name or ID
 
+    ignore_already_stopped
+        Boolean flag that prevent execution to fail, if a container
+        is already stopped.
+
+    fail_on_exit_status
+        Boolean flag to report execution as failure if ``exit_status``
+        is different than 0.
 
     **RETURN DATA**
 
@@ -4845,7 +4944,36 @@ def wait(name):
 
         salt myminion dockerng.wait mycontainer
     '''
-    return _change_state(name, 'wait', 'stopped')
+    try:
+        pre = state(name)
+    except CommandExecutionError:
+        # Container doesn't exist anymore
+        return {'result': ignore_already_stopped,
+                'comment': 'Container \'{0}\' absent'.format(name)}
+    already_stopped = pre == 'stopped'
+    response = _client_wrapper('wait', name)
+    _clear_context()
+    try:
+        post = state(name)
+    except CommandExecutionError:
+        # Container doesn't exist anymore
+        post = None
+
+    if already_stopped:
+        success = ignore_already_stopped
+    elif post == 'stopped':
+        success = True
+    else:
+        success = False
+
+    result = {'result': success,
+              'state': {'old': pre, 'new': post},
+              'exit_status': response}
+    if already_stopped:
+        result['comment'] = 'Container \'{0}\' already stopped'.format(name)
+    if fail_on_exit_status and result['result']:
+        result['result'] = result['exit_status'] == 0
+    return result
 
 
 # Functions to run commands inside containers
@@ -4908,8 +5036,12 @@ def _script(name,
         try:
             os.remove(path)
         except (IOError, OSError) as exc:
-            log.error('cmd.script: Unable to clean tempfile {0!r}: {1}'
-                      .format(path, exc))
+            log.error(
+                'cmd.script: Unable to clean tempfile \'{0}\': {1}'.format(
+                    path,
+                    exc
+                )
+            )
 
     path = salt.utils.mkstemp(dir='/tmp',
                               prefix='salt',
