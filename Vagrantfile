@@ -13,7 +13,7 @@ Vagrant.configure(2) do |config|
     SHELL
   end
 
-  3.times do |i|
+  1.times do |i|
     config.vm.define "minion#{i}" do |minion|
       # minion.vm.hostname = "minion#{i}"
       minion.vm.provision 'shell', inline: <<-SHELL
