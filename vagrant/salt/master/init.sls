@@ -66,5 +66,5 @@ salt-api:
               - .*
               - '@wheel'
               - '@runner'
-            - '@jobs'gg
+              - '@jobs'
 
