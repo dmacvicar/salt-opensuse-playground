@@ -1,11 +1,8 @@
+bind-utils:
+  pkg.installed
 
-include:
-  - common.slp
-
-openslp:
-  pkg.installed:
-    - require:
-      - sls: common.slp
+avahi-utils:
+  pkg.installed
 
 salt-minion:
   pkg.installed: []
@@ -17,10 +14,8 @@ salt-minion:
 
 /etc/salt/minion.d/master.conf:
   file.managed:
-    - contents: |
-        {% set stop = salt['service.stop']('SuSEfirewall2') %}
-        {% set master = salt['cmd.script'](source='salt://minion/find-master.sh')['stdout'] %}
-        master: {{ master }}
+    - source: salt://minion/master.conf
+    - template: jinja
     - require:
-        - pkg: salt-minion
-        - pkg: openslp
+      - pkg: salt-minion
+      - pkg: avahi-utils

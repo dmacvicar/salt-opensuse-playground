@@ -1,14 +1,3 @@
-include:
-  - common.slp
-
-openslp-server:
-  pkg.installed: []
-  service.running:
-    - name: slpd
-    - enable: True
-    - require_in:
-        - pkg: salt-master
-
 salt-master:
   pkg.installed: []
   service.running:
@@ -17,9 +6,29 @@ salt-master:
         - file: /etc/salt/master.d/salt-auth.conf
     - enable: True
 
-publish master:
-  cmd.run:
-    - name: slptool register service:salt-master://{{ salt['network.interfaces']()['eth0']['inet'][0]['address'] }}
+avahi:
+  pkg.installed
+
+avahi-daemon:
+  service.running:
+    - enabled: True
+    - require:
+        - pkg: avahi
+    - watch:
+        - file: /etc/avahi/services/salt-master.service
+
+/etc/avahi/services/salt-master.service:
+  file.managed:
+    - contents: |
+        <service-group>
+          <name replace-wildcards="yes">%h</name>
+          <service>
+            <type>_salt-master._tcp</type>
+            <port></port>
+          </service>
+        </service-group>
+    - require:
+        - pkg: avahi
 
 # use the vagrant /srv/salt
 /etc/salt/master.d/vagrant-fileroot.conf:
@@ -57,5 +66,5 @@ salt-api:
               - .*
               - '@wheel'
               - '@runner'
-              - '@jobs'
+            - '@jobs'gg
 
