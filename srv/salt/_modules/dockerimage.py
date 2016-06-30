@@ -15,6 +15,7 @@ import os.path
 import shutil
 import tempfile
 import salt.utils.thin
+import salt.pillar
 import salt.exceptions
 import salt.fileclient
 
@@ -53,7 +54,7 @@ def _prepare_trans_tar(mods=None, saltenv='base'):
     _mk_client()
     trans_tar = salt.client.ssh.state.prep_trans_tar(
         __context__['cp.fileclient'],
-        chunks, refs)
+        chunks, refs, pillar={'docker': {'guess': 'no'}})
     return trans_tar
 
 
@@ -96,11 +97,6 @@ def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
     '''
     tmpdir = tempfile.mkdtemp()
     thin_path = salt.utils.thin.gen_thin(tmpdir)
-    unpack_path = os.path.join(tmpdir, 'salt')
-    state_path = os.path.join(tmpdir, 'srv', 'salt')
-
-    os.makedirs(unpack_path)
-    os.makedirs(state_path)
 
     if mods is not None:
         mods = [x.strip() for x in mods.split(',')]
@@ -108,7 +104,7 @@ def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
         mods = []
 
     # prepare salt itself
-    __salt__['archive.tar']('-zxf', thin_path, dest=unpack_path)
+    __salt__['archive.tar']('-zxf', thin_path, dest=tmpdir)
 
     # prepare the state tree. May be this is a hack
     trans_tar = _prepare_trans_tar(mods=mods, saltenv=saltenv)
@@ -123,31 +119,38 @@ def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
 
     shutil.move(trans_tar, os.path.join(tmpdir, 'salt_state.tgz'))
 
-    content = """
-    FROM {base}
-    ADD ./salt /tmp/salt
-    COPY ./salt_state.tgz /tmp/salt/salt_state.tgz
-    ADD ./srv /tmp/srv
-    WORKDIR /tmp/salt
-    RUN zypper -n in --no-recommends python
-    RUN python ./salt-call --out json --out-file out.json -l debug --retcode-passthrough --local state.pkg /tmp/salt/salt_state.tgz {trans_tar_sha256} sha256 && (cat out.json | grep -v "\"result\": false")
-    # hack because salt-call state.pkg does not respect exit codes, docker build would not
-    # fail if applying the state fails
-    """.format(
-        base=base,
-        trans_tar_sha256=trans_tar_sha256.hexdigest()
-    )
+    ret = {}
+    ret_debug = {}
+    ret['result'] = True
 
-    log.info('Dockerfile to build:\n{0}'.format(content))
-    dockerfile_path = os.path.join(tmpdir, 'Dockerfile')
-    with open(dockerfile_path, 'w') as f:
-        f.write(content)
+    # start a new container
+    ret_debug['create'] = __salt__['dockerng.create'](image=base,
+                                                         cmd='/usr/bin/sleep infinity',
+                                                         binds=['{0}:/tmp/salt:ro'.format(tmpdir)],
+                                                         interactive=True, tty=True)
+    container_id = ret_debug['create']['Id']
+    ret_debug['start'] =__salt__['dockerng.start'](container_id)
 
-    ret = None
-    try:
-        ret = __salt__['dockerng.build'](path=tmpdir, image=name)
-    except salt.exceptions.CommandExecutionError as e:
-        return False, e.args[0]
+    ret_debug['commands'] = []
+    # HACK we need a distro agnostic way of installing python
+    cmd_ret = __salt__['dockerng.run_all'](container_id, 'zypper -n in --no-recommends python')
+    if cmd_ret['retcode'] != 0:
+        ret['result'] = False
+    ret_debug['commands'].append(cmd_ret)
 
+    # Now execute the state into the container
+    # TODO examine the json output because salt-call will return 0 even if a
+    # state failed
+    cmd_ret = __salt__['dockerng.run_all'](container_id,
+                                           'python /tmp/salt/salt-call --out json -l debug --retcode-passthrough --local state.pkg /tmp/salt/salt_state.tgz {trans_tar_sha256} sha256'.format(trans_tar_sha256=trans_tar_sha256.hexdigest()))
+    if cmd_ret['retcode'] != 0:
+        ret['result'] = False
+    ret_debug['commands'].append(cmd_ret)
+
+    ret_debug['stop'] =__salt__['dockerng.stop'](container_id)
+    ret = __salt__['dockerng.commit'](container_id, name)
+
+    if 'debug' in kwargs and kwargs['debug']:
+        ret['debug'] = ret_debug
     shutil.rmtree(tmpdir)
     return ret
