@@ -129,8 +129,10 @@ def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
     COPY ./salt_state.tgz /tmp/salt/salt_state.tgz
     ADD ./srv /tmp/srv
     WORKDIR /tmp/salt
-    RUN zypper -n in --no-recommends python python-msgpack-python
-    RUN python ./salt-call -l debug --retcode-passthrough --local state.pkg /tmp/salt/salt_state.tgz {trans_tar_sha256} sha256
+    RUN zypper -n in --no-recommends python
+    RUN python ./salt-call --out json --out-file out.json -l debug --retcode-passthrough --local state.pkg /tmp/salt/salt_state.tgz {trans_tar_sha256} sha256 && (cat out.json | grep "\"result\": false")
+    # hack because salt-call state.pkg does not respect exit codes, docker build would not
+    # fail if applying the state fails
     """.format(
         base=base,
         trans_tar_sha256=trans_tar_sha256.hexdigest()
