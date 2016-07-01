@@ -5635,9 +5635,11 @@ def call(name, function=None, args=[], **kwargs):
     cmd = 'python /tmp/salt_thin/salt-call --retcode-passthrough --out json --local {0} {1}'.format(function, ' '.join(args))
     ret = __salt__['dockerng.run_all'](name, cmd)
     try:
-        return json.loads(ret['stdout'])['local']
+        data = salt.utils.find_json(ret['stdout'])
+        return data.get('local', data)
     except ValueError:
         return {'result': False, 'comment': ret}
+
 
 def sls(name, mods=None, saltenv='base', **kwargs):
     '''
