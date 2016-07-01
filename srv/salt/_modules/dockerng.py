@@ -5620,6 +5620,9 @@ def call(name, function=None, args=[], **kwargs):
 
     TODO: support kwargs
     '''
+    # HACK we need python
+    __salt__['dockerng.run_all'](name, 'zypper -n in --no-recommends python')
+
     # put_archive reqires the path to exist
     __salt__['dockerng.run_all'](name, 'mkdir -p /tmp/salt_thin')
 
@@ -5629,13 +5632,60 @@ def call(name, function=None, args=[], **kwargs):
     with io.open(thin_path, 'rb') as file:
         _client_wrapper('put_archive', name, '/tmp/salt_thin', file)
 
-    cmd = 'python /tmp/salt_thin/salt-call --out json --local {0} {1}'.format(function, ' '.join(args))
+    cmd = 'python /tmp/salt_thin/salt-call --retcode-passthrough --out json --local {0} {1}'.format(function, ' '.join(args))
     ret = __salt__['dockerng.run_all'](name, cmd)
-    return json.loads(ret['stdout'])['local']
+    try:
+        return json.loads(ret['stdout'])['local']
+    except ValueError:
+        return {'result': False, 'comment': ret}
+
+def sls(name, mods=None, saltenv='base', **kwargs):
+    '''
+    Apply the highstate defined by the specified modules.
+
+    For example, if your master defines the states ``web`` and ``rails``, you
+    can apply them to a container:
+    states by doing:
+
+    .. code-block:: bash
+
+        salt myminion dockerimage.sls compassionate_mirzakhani mods=rails,web
+    '''
+    if mods is not None:
+        mods = [x.strip() for x in mods.split(',')]
+    else:
+        mods = []
+
+    # gather grains from the container
+    grains = __salt__['dockerng.call'](name, function='grains.items')
+
+    # compile pillar with container grains
+    pillar = _gather_pillar(saltenv, {}, grains)
+
+    trans_tar = _prepare_trans_tar(mods=mods, saltenv=saltenv, pillar=pillar)
+    try:
+        trans_tar_sha256 = salt.utils.get_hash(trans_tar, 'sha256')
+        __salt__['dockerng.copy_to'](name, trans_tar,
+                                     '/tmp/salt_state.tgz',
+                                     exec_driver='nsenter',
+                                     overwrite=True)
+
+        # Now execute the state into the container
+        ret = __salt__['dockerng.call'](name, function='state.pkg',
+                                        args=['/tmp/salt_state.tgz',
+                                              trans_tar_sha256, 'sha256'])
+        # set right exit code
+        __context__['retcode'] = 0
+        for _, state in ret.iteritems():
+            if not state['result']:
+                __context__['retcode'] = 1
+    finally:
+        os.remove(trans_tar)
+    return ret
 
 
-def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
-                **kwargs):
+def sls_build(name, base='opensuse:42.1', mods=None, saltenv='base',
+              **kwargs):
     '''
     Build a docker image using the specified sls modules and base image.
 
@@ -5647,70 +5697,22 @@ def build_image(name, base='opensuse:42.1', mods=None, saltenv='base',
 
         salt myminion dockerimage.build_image imgname mods=rails,web
     '''
-    tmpdir = tempfile.mkdtemp()
-    thin_path = salt.utils.thin.gen_thin(__opts__['cachedir'])
-
-    if mods is not None:
-        mods = [x.strip() for x in mods.split(',')]
-    else:
-        mods = []
-
-    # prepare salt itself
-    __salt__['archive.tar']('-zxf', thin_path, dest=tmpdir)
-
-    ret = {}
-    ret_debug = {}
-    ret['result'] = True
 
     # start a new container
-    ret_debug['create'] = __salt__['dockerng.create'](image=base,
-                                                         cmd='/usr/bin/sleep infinity',
-                                                         binds=['{0}:/tmp/salt:ro'.format(tmpdir)],
-                                                         interactive=True, tty=True)
-    container_id = ret_debug['create']['Id']
-    ret_debug['start'] =__salt__['dockerng.start'](container_id)
+    ret = __salt__['dockerng.create'](image=base,
+                                      cmd='/usr/bin/sleep infinity',
+                                      interactive=True, tty=True)
+    id = ret['Id']
+    try:
+        __salt__['dockerng.start'](id)
 
-    ret_debug['commands'] = []
+        # Now execute the state into the container
+        __salt__['dockerng.sls'](id, mods, saltenv, **kwargs)
 
-    # HACK we need a distro agnostic way of installing python
-    cmd_ret = __salt__['dockerng.run_all'](container_id, 'zypper -n in --no-recommends python')
-    if cmd_ret['retcode'] != 0:
-        ret['result'] = False
-    ret_debug['commands'].append(cmd_ret)
+    finally:
+        __salt__['dockerng.stop'](id)
+        return __salt__['dockerng.commit'](id, name)
 
-    # gather grain data to compile pillar
-    grains = {}
-    cmd_ret = __salt__['dockerng.run_all'](container_id, 'python /tmp/salt/salt-call --out json --local grains.items')
-    if cmd_ret['retcode'] != 0:
-        ret['result'] = False
-    else:
-        grains.update(json.loads(cmd_ret['stdout'])['local'])
-    ret_debug['commands'].append(cmd_ret)
 
-    # compile pillar with container grains
-    pillar = _gather_pillar(saltenv, {}, grains)
 
-    # prepare the state tree with the compiled pillar data
-    ret['pillar'] = pillar
-    ret['grains'] = grains
-    trans_tar = _prepare_trans_tar(mods=mods, saltenv=saltenv, pillar=pillar)
-    trans_tar_sha256 = salt.utils.get_hash(trans_tar, 'sha256')
-    shutil.move(trans_tar, os.path.join(tmpdir, 'salt_state.tgz'))
-
-    # Now execute the state into the container
-    # TODO examine the json output because salt-call will return 0 even if a
-    # state failed
-    cmd_ret = __salt__['dockerng.run_all'](container_id,
-                                           'python /tmp/salt/salt-call --out json -l debug --retcode-passthrough --local state.pkg /tmp/salt/salt_state.tgz {trans_tar_sha256} sha256'.format(trans_tar_sha256=trans_tar_sha256))
-    if cmd_ret['retcode'] != 0:
-        ret['result'] = False
-    ret_debug['commands'].append(cmd_ret)
-
-    ret_debug['stop'] =__salt__['dockerng.stop'](container_id)
-    ret.update(__salt__['dockerng.commit'](container_id, name))
-
-    if 'debug' in kwargs and kwargs['debug']:
-        ret['debug'] = ret_debug
-    shutil.rmtree(tmpdir)
-    return ret
 
