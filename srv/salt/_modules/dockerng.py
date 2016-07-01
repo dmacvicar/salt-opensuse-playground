@@ -5617,6 +5617,8 @@ def call(name, function=None, args=[], **kwargs):
     .. code-block:: bash
 
         salt myminion dockerimage.call function=test.ping
+
+    TODO: support kwargs
     '''
     # put_archive reqires the path to exist
     __salt__['dockerng.run_all'](name, 'mkdir -p /tmp/salt_thin')
